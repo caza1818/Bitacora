@@ -1,0 +1,152 @@
+from flask import Flask
+from threading import Thread
+import discord
+from discord.ext import commands
+import os
+from datetime import datetime, timedelta
+import pytz
+
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Hello, I am alive!"
+
+def run():
+    app.run(host='0.0.0.0', port=8080)
+
+def keep_alive():
+    t = Thread(target=run)
+    t.start()
+
+# Cargar el token del bot desde las variables de entorno
+TOKEN = os.getenv('TOKEN')
+
+# Verificar si el token está cargado correctamente
+if TOKEN is None:
+    print("Error: Token no encontrado. Asegúrate de haber configurado la variable de entorno correctamente.")
+
+# Configurar intents
+intents = discord.Intents.default()
+intents.message_content = True  # Habilitar el intent de contenido de mensajes
+
+# Configuración del bot
+bot = commands.Bot(command_prefix='!', intents=intents)
+
+# Zona horaria de México
+tz_mexico = pytz.timezone('America/Mexico_City')
+
+# Diccionario para almacenar datos de las entradas de los usuarios
+user_data = {}
+
+# Obtener el apodo o nombre de usuario
+def get_display_name(member):
+    return member.mention
+
+# Obtener el formato de tiempo con AM/PM
+def get_formatted_time(now):
+    formatted_time = now.strftime('%I:%M %p')  # Formato hora y minutos con AM/PM
+    return formatted_time
+
+# Calcular las horas rubí
+def calculate_horas_rubi(entries):
+    total_horas_rubi = timedelta()
+
+    for entrada, salida in entries:
+        if salida is None:
+            continue
+
+        start_time = entrada.replace(hour=8, minute=0, second=0, microsecond=0)
+        end_time = entrada.replace(hour=2, minute=0, second=0, microsecond=0) + timedelta(days=1)
+
+        if entrada > end_time:
+            continue
+
+        if salida > end_time:
+            salida = end_time
+
+        horas_rubi = max(min(salida, end_time) - max(entrada, start_time), timedelta(hours=0))
+        total_horas_rubi += horas_rubi
+
+    return total_horas_rubi
+
+# Comando de entrada
+@bot.command(name='entrada')
+async def entrada(ctx):
+    now = datetime.now(tz_mexico)
+    display_name = get_display_name(ctx.author)
+
+    if ctx.author.id in user_data:
+        if user_data[ctx.author.id]['entries'][-1][1] is None:
+            await ctx.send("Debes registrar tu salida antes de registrar una nueva entrada.")
+        else:
+            # Editar mensaje existente para agregar nueva entrada
+            user_data[ctx.author.id]['entries'].append((now, None))
+            user_data[ctx.author.id]['entrada'] = now
+            user_data[ctx.author.id]['total_hours'] = sum((salida - entrada for entrada, salida in user_data[ctx.author.id]['entries'] if salida is not None), timedelta())
+            user_data[ctx.author.id]['horas_rubi'] = calculate_horas_rubi(user_data[ctx.author.id]['entries'])
+
+            message_id = user_data[ctx.author.id]['message_id']
+            message = await ctx.fetch_message(message_id)
+            entrada_times = " / ".join([get_formatted_time(entry[0]) for entry in user_data[ctx.author.id]['entries']])
+            salida_times = " / ".join([get_formatted_time(entry[1]) if entry[1] else "" for entry in user_data[ctx.author.id]['entries']])
+            total_time_str = f"{int(user_data[ctx.author.id]['total_hours'].total_seconds() // 3600)}h {int((user_data[ctx.author.id]['total_hours'].total_seconds() % 3600) // 60)}m"
+            horas_rubi_str = f"{int(user_data[ctx.author.id]['horas_rubi'].total_seconds() // 3600)}h {int((user_data[ctx.author.id]['horas_rubi'].total_seconds() % 3600) // 60)}m"
+
+            new_content = f"Usuario: {display_name}\n🗓️Fecha: {now.strftime('%Y-%m-%d')}\n⏳Entrada: {entrada_times}\n⌛Salida: {salida_times}\n⏲️Total de Horas: {total_time_str}\n♦️Horas Rubis: {horas_rubi_str}"
+            await message.edit(content=new_content)
+    else:
+        # Crear nuevo mensaje para la primera entrada
+        user_data[ctx.author.id] = {'entrada': now, 'entries': [(now, None)], 'message_id': None, 'total_hours': timedelta(), 'horas_rubi': timedelta()}
+        message = await ctx.send(f"Usuario: {display_name}\n🗓️Fecha: {now.strftime('%Y-%m-%d')}\n⏳Entrada: {get_formatted_time(now)}\n⌛Salida:\n⏲️Total de Horas:\n♦️Horas Rubis:")
+        user_data[ctx.author.id]['message_id'] = message.id
+
+    await ctx.message.delete()  # Eliminar el mensaje del usuario
+
+
+# Comando de salida
+@bot.command(name='salida')
+async def salida(ctx):
+    if ctx.author.id not in user_data or user_data[ctx.author.id]['entries'][-1][1] is not None:
+        await ctx.send("Primero debes registrar tu entrada usando !entrada o ya has registrado tu salida.")
+    else:
+        now = datetime.now(tz_mexico)
+        display_name = get_display_name(ctx.author)
+
+        # Actualizar la última entrada con la salida
+        entries = user_data[ctx.author.id]['entries']
+        entrada_time = entries[-1][0]
+        entries[-1] = (entrada_time, now)
+
+        # Calcular el tiempo total y las horas rubí
+        total_time = sum((salida - entrada for entrada, salida in entries if salida is not None), timedelta())
+        horas_rubi = calculate_horas_rubi(entries)
+
+        # Formatear tiempo total sin segundos
+        total_time_str = f"{int(total_time.total_seconds() // 3600)}h {int((total_time.total_seconds() % 3600) // 60)}m"
+        horas_rubi_str = f"{int(horas_rubi.total_seconds() // 3600)}h {int((horas_rubi.total_seconds() % 3600) // 60)}m"
+
+        # Editar mensaje existente para agregar nueva salida
+        message_id = user_data[ctx.author.id]['message_id']
+        message = await ctx.fetch_message(message_id)
+        entrada_times = " / ".join([get_formatted_time(entry[0]) for entry in entries])
+        salida_times = " / ".join([get_formatted_time(entry[1]) if entry[1] else "" for entry in entries])
+        new_content = f"Usuario: {display_name}\n🗓️Fecha: {now.strftime('%Y-%m-%d')}\n⏳Entrada: {entrada_times}\n⌛Salida: {salida_times}\n⏲️Total de Horas: {total_time_str}\n♦️Horas Rubis: {horas_rubi_str}"
+        await message.edit(content=new_content)
+
+        # Actualizar datos del usuario con la salida
+        user_data[ctx.author.id]['salida'] = now
+        user_data[ctx.author.id]['total_hours'] = total_time
+        user_data[ctx.author.id]['horas_rubi'] = horas_rubi
+
+    await ctx.message.delete()  
+# Eliminar el mensaje del usuario
+
+# Evento on_ready
+@bot.event
+async def on_ready():
+    print(f'Bot conectado como {bot.user}')
+
+# Ejecutar el bot
+keep_alive()
+bot.run(TOKEN)
